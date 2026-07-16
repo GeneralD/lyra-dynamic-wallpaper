@@ -59,13 +59,16 @@ struct LyraDynamicWallpaperCommand: AsyncParsableCommand {
                 progress.extractFrameCompleted(total: totalFrames, clipIndex: index + 1, clipCount: clips.count)
             }
         }
-        progress.extractFinished(total: totalFrames, clipCount: clips.count)
         let imagesByIndex = perClipImages.reduce(into: [Int: CGImage]()) { $0.merge($1) { current, _ in current } }
 
         let images = (0..<frames).compactMap { imagesByIndex[$0] }
         guard images.count == frames else {
             throw ToolError("extracted only \(images.count)/\(frames) frames — a source may be too short or unreadable")
         }
+        // Only announce success once the completeness guard above has passed
+        // — printing this unconditionally would show a success-shaped
+        // summary immediately before the error on a short-extraction failure.
+        progress.extractFinished(total: totalFrames, clipCount: clips.count)
 
         let outputURL = Self.resolveOutputURL(output)
         progress.phaseStarted("encoding HEIC …")
