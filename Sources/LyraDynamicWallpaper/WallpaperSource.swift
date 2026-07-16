@@ -36,8 +36,12 @@ struct WallpaperSource {
     /// Resolve every configured item to a `ResolvedClip`, in config order.
     ///
     /// Unresolvable items (download failure, missing tool) are skipped with a
-    /// warning rather than aborting the whole run.
-    func resolveClips() async throws -> [ResolvedClip] {
+    /// warning rather than aborting the whole run. `warn` is injectable
+    /// (defaulting to the plain stderr writer) so a caller running this
+    /// mid-phase — with a `ProgressReporter` live line on screen — can route
+    /// warnings through `ProgressReporter.interject` instead, so a skip
+    /// warning can never land mid-line and corrupt the progress display.
+    func resolveClips(warn: @Sendable (String) -> Void = warn) async throws -> [ResolvedClip] {
         let (items, configDir) = try configuredItems()
         return try await items.asyncCompactMap { item in
             guard let url = try await resolve(item, configDir: configDir) else {

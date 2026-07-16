@@ -44,9 +44,14 @@ struct LyraDynamicWallpaperCommand: AsyncParsableCommand {
         // terminates a dangling `\r`-anchored line so the thrown error's
         // message doesn't overwrite it from column 0 (see finalizeIfDangling).
         defer { progress.finalizeIfDangling() }
+        // Routes any mid-phase warning through the same lock/cursor
+        // discipline as the live progress line, so a skip/failure warning
+        // (resolve's unresolvable-item skip, extract's per-frame failure)
+        // can never land mid-line and corrupt it (see ProgressReporter.interject).
+        let liveWarn: @Sendable (String) -> Void = { progress.interject(warningLine($0)) }
 
         progress.phaseStarted("resolving wallpapers …")
-        let clips = try await WallpaperSource().resolveClips()
+        let clips = try await WallpaperSource().resolveClips(warn: liveWarn)
         guard !clips.isEmpty else { throw ToolError("no usable wallpaper videos resolved from lyra config") }
         progress.resolveFinished(clipCount: clips.count)
 
@@ -55,9 +60,11 @@ struct LyraDynamicWallpaperCommand: AsyncParsableCommand {
 
         progress.phaseStarted("extracting frames …")
         let perClipImages = await clips.indices.asyncMap { index in
-            await FrameExtraction.render(clip: clips[index], samples: perClipSamples[index], outputSize: outputSize) {
-                progress.extractFrameCompleted(total: totalFrames, clipIndex: index + 1, clipCount: clips.count)
-            }
+            await FrameExtraction.render(
+                clip: clips[index], samples: perClipSamples[index], outputSize: outputSize,
+                onProgress: { progress.extractFrameCompleted(total: totalFrames, clipIndex: index + 1, clipCount: clips.count) },
+                warn: liveWarn
+            )
         }
         let imagesByIndex = perClipImages.reduce(into: [Int: CGImage]()) { $0.merge($1) { current, _ in current } }
 
@@ -83,6 +90,9 @@ struct LyraDynamicWallpaperCommand: AsyncParsableCommand {
             if failures.isEmpty {
                 print("applied to desktop (lock screen follows unless separately customised).")
             } else {
+                // Plain warn(), not liveWarn — every progress phase (including
+                // encodeFinished above) has already finished by this point, so
+                // no `\r`-anchored live line can be on screen to corrupt.
                 warn("could not apply on: \(failures.joined(separator: ", "))")
             }
         }

@@ -9,9 +9,23 @@ struct ToolError: Error, CustomStringConvertible, LocalizedError {
     var errorDescription: String? { message }
 }
 
+/// The formatted text of a warning line, without a trailing newline —
+/// shared so a caller that must coordinate with `ProgressReporter` (see
+/// `ProgressReporter.interject`) writes byte-for-byte the same warning
+/// `warn(_:)` would have written directly.
+func warningLine(_ message: String) -> String { "lyra-dynamic-wallpaper: warning: \(message)" }
+
 /// Write a warning to stderr without aborting the run.
+///
+/// This writes directly and unconditionally — safe only when no phase with
+/// a live `\r`-anchored progress line can be in flight (e.g. after the
+/// pipeline has already finished every progress phase). A caller inside a
+/// phase that draws a live line (`WallpaperSource.resolveClips`,
+/// `FrameExtraction.render`) must instead route warnings through a `warn`
+/// closure that calls `ProgressReporter.interject(warningLine(message))`,
+/// or a direct write here can land mid-line and corrupt it.
 func warn(_ message: String) {
-    FileHandle.standardError.write(Data("lyra-dynamic-wallpaper: warning: \(message)\n".utf8))
+    FileHandle.standardError.write(Data((warningLine(message) + "\n").utf8))
 }
 
 /// Total playable duration of a video, in seconds.

@@ -236,6 +236,50 @@ private final class FakeSink: @unchecked Sendable {
         #expect(sink.joined == "resolving wallpapers …\n")
     }
 
+    // MARK: - Interjection (warn() coordination — must not corrupt a live line)
+
+    @Test func interjectClearsALiveLineBeforePrintingTheMessage() {
+        let clock = FakeClock()
+        let sink = FakeSink()
+        let reporter = makeReporter(isTTY: true, clock: clock, sink: sink)
+
+        reporter.extractFrameCompleted(total: 10, clipIndex: 1, clipCount: 1) // draws a live line
+        reporter.interject("lyra-dynamic-wallpaper: warning: could not resolve foo.mp4 — skipping")
+
+        // The live line must be erased (its own \r + spaces + \r) before the
+        // warning is printed, exactly like finishPhase — never appended onto
+        // the same visual line.
+        #expect(sink.joined.hasSuffix("lyra-dynamic-wallpaper: warning: could not resolve foo.mp4 — skipping\n"))
+        #expect(sink.joined.contains("\r"))
+    }
+
+    @Test func interjectResetsLineStateSoTheNextRedrawStartsClean() {
+        let clock = FakeClock()
+        let sink = FakeSink()
+        let reporter = makeReporter(isTTY: true, clock: clock, sink: sink)
+
+        reporter.extractFrameCompleted(total: 1000, clipIndex: 3, clipCount: 5) // long line
+        reporter.interject("warning")
+        clock.advance(by: 0.09)
+        reporter.encodeFrameCompleted(total: 1) // short line, unrelated phase
+
+        // If interject left the old (long) lastLineLength in place, this
+        // short redraw would still be padded to erase the long line's tail;
+        // instead it should draw as if nothing was on screen.
+        let lastWrite = sink.joined.components(separatedBy: "\r").last ?? ""
+        #expect(!lastWrite.contains("  "))
+    }
+
+    @Test func interjectOnNonTTYJustPrintsTheMessage() {
+        let clock = FakeClock()
+        let sink = FakeSink()
+        let reporter = makeReporter(isTTY: false, clock: clock, sink: sink)
+
+        reporter.interject("lyra-dynamic-wallpaper: warning: empty trim range — skipping")
+
+        #expect(sink.joined == "lyra-dynamic-wallpaper: warning: empty trim range — skipping\n")
+    }
+
     // MARK: - TTY: phaseStarted is visible immediately (no silent phases)
 
     @Test func phaseStartedIsVisibleOnTTYEvenBeforeAnyLiveUpdate() {
