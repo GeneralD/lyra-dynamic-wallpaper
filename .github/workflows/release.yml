@@ -16,6 +16,10 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+          # Tag creation goes through `gh api` (no persisted git credentials
+          # needed), and SwiftPM package resolution runs arbitrary build-time
+          # code — don't leave the token in .git/config for it to read.
+          persist-credentials: false
 
       - name: Extract version
         run: |
@@ -33,12 +37,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh api "repos/${{ github.repository }}/git/refs/tags/${TAG}" >/dev/null 2>&1; then
+          # git/ref/tags (singular) is the exact-match endpoint — git/refs/tags
+          # is a prefix filter that 200s with [] for a missing tag.
+          if gh api "repos/${{ github.repository }}/git/ref/tags/${TAG}" >/dev/null 2>&1; then
             echo "Tag ${TAG} already exists on remote"
             echo "created=false" >> "$GITHUB_OUTPUT"
           else
-            git tag "$TAG"
-            git push origin "$TAG"
+            gh api -X POST "repos/${{ github.repository }}/git/refs" \
+              -f ref="refs/tags/${TAG}" -f sha="${GITHUB_SHA}"
             echo "created=true" >> "$GITHUB_OUTPUT"
           fi
 
@@ -66,8 +72,12 @@ jobs:
           cp "$BUILD_DIR/lyra-dynamic-wallpaper" "$STAGING/"
           codesign --force --sign - "$STAGING/lyra-dynamic-wallpaper"
           find "$BUILD_DIR" -name '*.bundle' -exec cp -R {} "$STAGING/" \;
-          tar czf "${STAGING}.tar.gz" "$STAGING"
+          # COPYFILE_DISABLE: codesign leaves xattrs that tar would package as
+          # ._ AppleDouble files. SHA256 is computed locally so the formula
+          # update never races GitHub's CDN propagation of the fresh asset.
+          COPYFILE_DISABLE=1 tar czf "${STAGING}.tar.gz" "$STAGING"
           echo "ARCHIVE=${STAGING}.tar.gz" >> "$GITHUB_ENV"
+          echo "SHA256=$(shasum -a 256 "${STAGING}.tar.gz" | cut -d' ' -f1)" >> "$GITHUB_ENV"
 
       - name: Create GitHub Release
         if: steps.release.outputs.exists == 'false'
@@ -79,7 +89,9 @@ jobs:
             --generate-notes
 
       - name: Update Homebrew formula
-        if: steps.tag.outputs.created == 'true'
+        # Keyed on release creation (not tag creation) so a retried run whose
+        # tag already exists still updates the formula once the release lands.
+        if: steps.release.outputs.exists == 'false'
         # Needs a HOMEBREW_PAT secret with write access to GeneralD/homebrew-tap;
         # continue-on-error keeps the release green while the secret is absent.
         continue-on-error: true
@@ -93,23 +105,21 @@ jobs:
             const tag = process.env.TAG;
             const version = process.env.VERSION;
 
-            // Download pre-built binary asset and compute sha256
-            const crypto = require('crypto');
+            // SHA256 was computed locally in the Package step — using it avoids
+            // racing the CDN propagation of the just-uploaded asset.
+            const sha256 = process.env.SHA256;
+            if (!sha256) throw new Error('SHA256 env missing — Package step did not run');
             const assetName = `lyra-dynamic-wallpaper-${version}-macos-arm64.tar.gz`;
             const url = `https://github.com/GeneralD/lyra-dynamic-wallpaper/releases/download/${tag}/${assetName}`;
-            const response = await fetch(url);
-            if (!response.ok) throw new Error(`Failed to download ${url}: ${response.status}`);
-            const buffer = Buffer.from(await response.arrayBuffer());
-            const sha256 = crypto.createHash('sha256').update(buffer).digest('hex');
             console.log(`SHA256: ${sha256}`);
 
             // Update formula
             const { data: file } = await github.rest.repos.getContent({ owner, repo, path });
             const content = Buffer.from(file.content, 'base64').toString('utf8');
             const updated = content
-              .replace(/url ".*"/, `url "${url}"`)
-              .replace(/version ".*"/, `version "${version}"`)
-              .replace(/sha256 ".*"/, `sha256 "${sha256}"`);
+              .replace(/url "[^"]+"/, `url "${url}"`)
+              .replace(/version "[^"]+"/, `version "${version}"`)
+              .replace(/sha256 "[^"]+"/, `sha256 "${sha256}"`);
 
             await github.rest.repos.createOrUpdateFileContents({
               owner, repo, path,
