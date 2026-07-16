@@ -22,6 +22,12 @@ The lock screen is drawn by `loginwindow` and hosts no third-party code, so neit
 ## Install
 
 ```sh
+brew install GeneralD/tap/lyra-dynamic-wallpaper   # also installs lyra itself
+```
+
+Or build from source:
+
+```sh
 git clone https://github.com/GeneralD/lyra-dynamic-wallpaper.git
 cd lyra-dynamic-wallpaper
 make install   # builds release and installs to /usr/local/bin

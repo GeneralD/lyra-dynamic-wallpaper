@@ -24,10 +24,7 @@ enum FrameExtraction {
             generator.maximumSize = maximumSize
         }
 
-        let times = samples.map { NSValue(time: CMTime(seconds: $0.time, preferredTimescale: 600)) }
-        // uniquingKeysWith: absurd frame counts can place two samples within the
-        // same millisecond — keep the first rather than trapping.
-        let keyToIndex = Dictionary(samples.map { (msKey($0.time), $0.index) }, uniquingKeysWith: { first, _ in first })
+        let (times, keyToIndex) = requestTable(for: samples)
         let collector = FrameCollector(remaining: samples.count)
         let scale = clip.scale
 
@@ -36,11 +33,15 @@ enum FrameExtraction {
                 var finished = false
                 collector.lock.lock()
                 if status == .succeeded, let cgImage,
-                   let index = keyToIndex[msKey(CMTimeGetSeconds(requestedTime))],
+                   let index = keyToIndex[key(for: requestedTime)],
                    let rendered = ImageProcessing.render(cgImage, to: outputSize, scale: scale) {
                     collector.images[index] = rendered
                 } else if let error {
                     warn("frame at \(String(format: "%.2f", CMTimeGetSeconds(requestedTime)))s failed: \(error.localizedDescription)")
+                } else if status == .succeeded {
+                    // Decoded fine but dropped on our side (key mismatch or render
+                    // failure) — never let that pass silently again.
+                    warn("frame at \(String(format: "%.3f", CMTimeGetSeconds(requestedTime)))s decoded but was dropped (key/render)")
                 }
                 collector.remaining -= 1
                 finished = collector.remaining == 0
@@ -51,9 +52,25 @@ enum FrameExtraction {
         }
     }
 
-    /// Match a requested time back to its sample; the callback echoes the exact
-    /// `CMTime` we requested, so a millisecond key round-trips reliably.
-    private static func msKey(_ seconds: Double) -> Int { Int((seconds * 1000).rounded()) }
+    /// The exact `CMTime`s to request plus the key→frame-index table the callback
+    /// resolves against. Both sides derive their key from the SAME quantized
+    /// `CMTime` (timescale 600): quantization shifts a raw-seconds key by up to
+    /// ±0.83 ms, and keying on the un-quantized `Double` silently dropped most
+    /// frames at high frame counts (369/1440 extracted).
+    static func requestTable(for samples: [FrameSample]) -> (times: [NSValue], keyToIndex: [Int: Int]) {
+        let requests = samples.map { (time: CMTime(seconds: $0.time, preferredTimescale: 600), index: $0.index) }
+        // uniquingKeysWith: absurd frame counts can place two samples within the
+        // same millisecond — keep the first rather than trapping.
+        let keyToIndex = Dictionary(
+            requests.map { (key(for: $0.time), $0.index) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        return (requests.map { NSValue(time: $0.time) }, keyToIndex)
+    }
+
+    /// Millisecond bucket of a (quantized) request time — the callback echoes the
+    /// exact `CMTime` we requested, so this round-trips reliably.
+    static func key(for time: CMTime) -> Int { Int((CMTimeGetSeconds(time) * 1000).rounded()) }
 
     /// The smallest decode size that still fills the output after aspect-fill +
     /// center zoom — capping `AVAssetImageGenerator.maximumSize` so 4K sources
