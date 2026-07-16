@@ -9,7 +9,10 @@ import UniformTypeIdentifiers
 /// macOS shows the frame nearest the current time of day (no Location Services,
 /// unlike the `solar` schema). The metadata is attached to the first image only.
 enum DynamicHeicEncoder {
-    static func write(images: [CGImage], to url: URL, quality: Double) throws {
+    /// `onProgress`, if given, is called once per image added to the
+    /// destination (in order) — disabled by default since encode is fast
+    /// enough that most callers don't need per-frame feedback.
+    static func write(images: [CGImage], to url: URL, quality: Double, onProgress: (@Sendable () -> Void)? = nil) throws {
         guard !images.isEmpty else { throw ToolError("no frames to encode") }
         guard let destination = CGImageDestinationCreateWithURL(
             url as CFURL, UTType.heic.identifier as CFString, images.count, nil
@@ -25,6 +28,7 @@ enum DynamicHeicEncoder {
             } else {
                 CGImageDestinationAddImage(destination, image, frameOptions)
             }
+            onProgress?()
         }
 
         guard CGImageDestinationFinalize(destination) else { throw ToolError("failed to write HEIC") }

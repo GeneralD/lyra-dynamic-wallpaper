@@ -12,7 +12,17 @@ struct FrameSample: Sendable {
 enum FrameExtraction {
     /// Extract each `sample` from `clip`, apply the clip's scale/aspect rendering,
     /// and return `[globalIndex: renderedImage]`.
-    static func render(clip: ResolvedClip, samples: [FrameSample], outputSize: CGSize) async -> [Int: CGImage] {
+    ///
+    /// `onProgress`, if given, is called once per frame callback (success or
+    /// failure — mirroring how `remaining` decrements either way), always
+    /// after the collector's lock is released so a slow/reentrant caller can
+    /// never stall frame collection.
+    static func render(
+        clip: ResolvedClip,
+        samples: [FrameSample],
+        outputSize: CGSize,
+        onProgress: (@Sendable () -> Void)? = nil
+    ) async -> [Int: CGImage] {
         guard !samples.isEmpty else { return [:] }
 
         let asset = AVURLAsset(url: clip.url)
@@ -47,6 +57,7 @@ enum FrameExtraction {
                 finished = collector.remaining == 0
                 let images = finished ? collector.images : [:]
                 collector.lock.unlock()
+                onProgress?()
                 if finished { continuation.resume(returning: images) }
             }
         }

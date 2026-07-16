@@ -39,14 +39,27 @@ struct LyraDynamicWallpaperCommand: AsyncParsableCommand {
 
     func run() async throws {
         let outputSize = try Self.parseSize(resize)
+        let progress = ProgressReporter()
+        // If any phase throws before reaching its `finished` call, this
+        // terminates a dangling `\r`-anchored line so the thrown error's
+        // message doesn't overwrite it from column 0 (see finalizeIfDangling).
+        defer { progress.finalizeIfDangling() }
 
+        progress.phaseStarted("resolving wallpapers …")
         let clips = try await WallpaperSource().resolveClips()
         guard !clips.isEmpty else { throw ToolError("no usable wallpaper videos resolved from lyra config") }
+        progress.resolveFinished(clipCount: clips.count)
 
         let perClipSamples = FrameTimeline.distribute(clips: clips, frameCount: frames)
+        let totalFrames = perClipSamples.reduce(0) { $0 + $1.count }
+
+        progress.phaseStarted("extracting frames …")
         let perClipImages = await clips.indices.asyncMap { index in
-            await FrameExtraction.render(clip: clips[index], samples: perClipSamples[index], outputSize: outputSize)
+            await FrameExtraction.render(clip: clips[index], samples: perClipSamples[index], outputSize: outputSize) {
+                progress.extractFrameCompleted(total: totalFrames, clipIndex: index + 1, clipCount: clips.count)
+            }
         }
+        progress.extractFinished(total: totalFrames, clipCount: clips.count)
         let imagesByIndex = perClipImages.reduce(into: [Int: CGImage]()) { $0.merge($1) { current, _ in current } }
 
         let images = (0..<frames).compactMap { imagesByIndex[$0] }
@@ -55,7 +68,11 @@ struct LyraDynamicWallpaperCommand: AsyncParsableCommand {
         }
 
         let outputURL = Self.resolveOutputURL(output)
-        try DynamicHeicEncoder.write(images: images, to: outputURL, quality: quality)
+        progress.phaseStarted("encoding HEIC …")
+        try DynamicHeicEncoder.write(images: images, to: outputURL, quality: quality) {
+            progress.encodeFrameCompleted(total: images.count)
+        }
+        progress.encodeFinished(total: images.count)
         report(outputURL: outputURL, clips: clips, dimensions: images[0])
 
         if apply {
