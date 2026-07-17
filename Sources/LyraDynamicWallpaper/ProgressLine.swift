@@ -21,12 +21,12 @@ enum ProgressLine {
     static func bar(completed: Int, total: Int, width: Int = 24) -> String {
         guard total > 0, width > 0 else { return "" }
         let fraction = min(1, max(0, Double(completed) / Double(total)))
-        let filled = Int((fraction * Double(width)).rounded())
+        let filled = completed >= total ? width : Int((fraction * Double(width)).rounded(.down))
         let hasHead = filled > 0 && filled < width
         let head = hasHead ? ">" : ""
         let filledDashes = String(repeating: "=", count: max(0, filled - head.count))
         let empty = String(repeating: " ", count: max(0, width - filled))
-        let percent = Int((fraction * 100).rounded())
+        let percent = completed >= total ? 100 : Int((fraction * 100).rounded(.down))
         return "[\(filledDashes)\(head)\(empty)] \(percent)%"
     }
 
