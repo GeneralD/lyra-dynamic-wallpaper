@@ -1,14 +1,22 @@
-# lyra-dynamic-wallpaper
+<h1 align="center">lyra-dynamic-wallpaper</h1>
 
 <!-- TODO: hero banner (assets/hero.jpg) — regenerate via make-image when an image backend is available -->
 
-![Swift](https://img.shields.io/badge/Swift-6.0-F05138?logo=swift&logoColor=white) ![Platform](https://img.shields.io/badge/macOS-14%2B-000000?logo=apple&logoColor=white) ![CI](https://github.com/GeneralD/lyra-dynamic-wallpaper/actions/workflows/ci.yml/badge.svg) ![License](https://img.shields.io/badge/license-GPL--3.0-blue)
+<p align="center">
+  <img src="https://img.shields.io/badge/Swift-6.0-F05138?logo=swift&amp;logoColor=white" alt="Swift 6.0">
+  <img src="https://img.shields.io/badge/macOS-14%2B-000000?logo=apple&amp;logoColor=white" alt="macOS 14+">
+  <img src="https://github.com/GeneralD/lyra-dynamic-wallpaper/actions/workflows/ci.yml/badge.svg" alt="CI">
+  <img src="https://img.shields.io/badge/license-GPL--3.0-blue" alt="License GPL-3.0">
+  <a href="https://github.com/GeneralD/lyra"><img src="https://img.shields.io/badge/built%20on-LyraKit-8A63D2" alt="Built on LyraKit"></a>
+</p>
 
 Turn [lyra](https://github.com/GeneralD/lyra)'s video wallpapers into a macOS **Dynamic Desktop** — a time-of-day `.heic` that carries lyra's world onto the one surface no third-party code can reach: the **lock screen**.
 
 The lock screen is drawn by `loginwindow` and hosts no third-party code, so neither lyra's live wallpaper nor [lyra-screensaver](https://github.com/GeneralD/lyra-screensaver) can appear there. A Dynamic Desktop HEIC can: macOS itself picks the frame matching the local clock, so the day flows through your configured videos — morning clips at dawn, night clips after dark.
 
 ## How it works
+
+<a href="https://github.com/GeneralD/lyra/blob/main/docs/LyraKit.md"><img src="assets/lyrakit-icon-transparent.png" align="right" width="88" alt="LyraKit"></a>
 
 1. Reads your existing lyra config (`~/.config/lyra/config.toml`, `[[wallpaper.items]]`) through [LyraKit](https://github.com/GeneralD/lyra) — the same library product lyra-screensaver links. No re-parsing, no re-implementation.
 2. Resolves every item to its locally cached video using lyra's own resolve pipeline (YouTube/remote download, content-hash cache, SQLite dedup index).
