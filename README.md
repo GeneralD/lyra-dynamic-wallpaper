@@ -1,6 +1,8 @@
 <h1 align="center">lyra-dynamic-wallpaper</h1>
 
-<!-- TODO: hero banner (assets/hero.jpg) — regenerate via make-image when an image backend is available -->
+<p align="center">
+  <img src="assets/hero.jpg" alt="lyra-dynamic-wallpaper — one day flowing from rose-gold dawn into a starry night crowned by the golden Lyra constellation, above a slim display silhouette" width="100%">
+</p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/Swift-6.0-F05138?logo=swift&amp;logoColor=white" alt="Swift 6.0">
