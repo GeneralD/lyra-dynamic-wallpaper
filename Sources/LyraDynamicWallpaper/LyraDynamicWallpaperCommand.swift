@@ -39,13 +39,32 @@ struct LyraDynamicWallpaperCommand: AsyncParsableCommand {
 
     func run() async throws {
         let outputSize = try Self.parseSize(resize)
+        let progress = ProgressReporter()
+        // If any phase throws before reaching its `finished` call, this
+        // terminates a dangling `\r`-anchored line so the thrown error's
+        // message doesn't overwrite it from column 0 (see finalizeIfDangling).
+        defer { progress.finalizeIfDangling() }
+        // Routes any mid-phase warning through the same lock/cursor
+        // discipline as the live progress line, so a skip/failure warning
+        // (resolve's unresolvable-item skip, extract's per-frame failure)
+        // can never land mid-line and corrupt it (see ProgressReporter.interject).
+        let liveWarn: @Sendable (String) -> Void = { progress.interject(warningLine($0)) }
 
-        let clips = try await WallpaperSource().resolveClips()
+        progress.phaseStarted("resolving wallpapers …")
+        let clips = try await WallpaperSource().resolveClips(warn: liveWarn)
         guard !clips.isEmpty else { throw ToolError("no usable wallpaper videos resolved from lyra config") }
+        progress.resolveFinished(clipCount: clips.count)
 
         let perClipSamples = FrameTimeline.distribute(clips: clips, frameCount: frames)
+        let totalFrames = perClipSamples.reduce(0) { $0 + $1.count }
+
+        progress.phaseStarted("extracting frames …")
         let perClipImages = await clips.indices.asyncMap { index in
-            await FrameExtraction.render(clip: clips[index], samples: perClipSamples[index], outputSize: outputSize)
+            await FrameExtraction.render(
+                clip: clips[index], samples: perClipSamples[index], outputSize: outputSize,
+                onProgress: { progress.extractFrameCompleted(total: totalFrames, clipIndex: index + 1, clipCount: clips.count) },
+                warn: liveWarn
+            )
         }
         let imagesByIndex = perClipImages.reduce(into: [Int: CGImage]()) { $0.merge($1) { current, _ in current } }
 
@@ -53,9 +72,17 @@ struct LyraDynamicWallpaperCommand: AsyncParsableCommand {
         guard images.count == frames else {
             throw ToolError("extracted only \(images.count)/\(frames) frames — a source may be too short or unreadable")
         }
+        // Only announce success once the completeness guard above has passed
+        // — printing this unconditionally would show a success-shaped
+        // summary immediately before the error on a short-extraction failure.
+        progress.extractFinished(total: totalFrames, clipCount: clips.count)
 
         let outputURL = Self.resolveOutputURL(output)
-        try DynamicHeicEncoder.write(images: images, to: outputURL, quality: quality)
+        progress.phaseStarted("encoding HEIC …")
+        try DynamicHeicEncoder.write(images: images, to: outputURL, quality: quality) {
+            progress.encodeFrameCompleted(total: images.count)
+        }
+        progress.encodeFinished(total: images.count)
         report(outputURL: outputURL, clips: clips, dimensions: images[0])
 
         if apply {
@@ -63,6 +90,9 @@ struct LyraDynamicWallpaperCommand: AsyncParsableCommand {
             if failures.isEmpty {
                 print("applied to desktop (lock screen follows unless separately customised).")
             } else {
+                // Plain warn(), not liveWarn — every progress phase (including
+                // encodeFinished above) has already finished by this point, so
+                // no `\r`-anchored live line can be on screen to corrupt.
                 warn("could not apply on: \(failures.joined(separator: ", "))")
             }
         }
