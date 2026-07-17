@@ -11,18 +11,28 @@ import Glibc
 /// only the mutable, lock-guarded state (cumulative frame counters, the last
 /// render time for throttling, the spinner tick, the currently-drawn line's
 /// length). Every public method follows the same shape: mutate state and
-/// compute the text to write while `lock` is held, then release `lock`
-/// BEFORE calling the (possibly slow/blocking, externally-injectable) `write`
-/// closure — same discipline as `FrameCollector` in `FrameExtraction.swift`,
-/// which releases its own lock before calling back out. This keeps a stalled
-/// `write` (e.g. flow-controlled stderr) from blocking other threads' cheap
-/// counter bumps. Safe to call from AVFoundation's callback threads.
+/// compute the text to write while `lock` is held, then ENQUEUE that text
+/// onto the serial `outputQueue` — still under `lock`, because enqueueing is
+/// cheap and non-blocking, and doing it under the same lock that ordered the
+/// state transition makes the queue's FIFO order match state-transition
+/// order. The (possibly slow/blocking, externally-injectable) `write` closure
+/// then runs on the queue's own thread: a stalled write (e.g. flow-controlled
+/// stderr) can neither block other threads' cheap counter bumps NOR be
+/// overtaken by a later transition's write — later chunks just queue up
+/// behind it. Safe to call from AVFoundation's callback threads.
+///
+/// Phase-boundary methods (`phaseStarted`, `finishPhase`,
+/// `finalizeIfDangling`) drain the queue before returning: they are called
+/// from the command's own task (never a frame callback), they are rare, and
+/// draining there guarantees the final summaries reach stderr before the
+/// process exits.
 ///
 /// `now`/`write` are injectable so tests can drive the throttle deterministically
 /// (a fake clock) and capture output (a fake sink) without touching a real
 /// terminal or sleeping.
 final class ProgressReporter: @unchecked Sendable {
     private let lock = NSLock()
+    private let outputQueue = DispatchQueue(label: "lyra-dynamic-wallpaper.progress-output")
     private let isTTY: Bool
     private let minRedrawInterval: TimeInterval
     private let now: @Sendable () -> Date
@@ -57,11 +67,10 @@ final class ProgressReporter: @unchecked Sendable {
     /// is the only visible signal that the phase began, so it always prints a
     /// plain line.
     func phaseStarted(_ label: String) {
-        let text = lock.withLock { () -> String in
-            guard isTTY else { return label + "\n" }
-            return prepareLine(label)
+        lock.withLock {
+            emit(isTTY ? prepareLine(label) : label + "\n")
         }
-        write(text)
+        flushOutput()
     }
 
     /// Terminate a dangling live line left by `phaseStarted`/a progress
@@ -75,28 +84,21 @@ final class ProgressReporter: @unchecked Sendable {
     /// line — the exact "can't tell what's happening" confusion this feature
     /// exists to remove, just moved to the failure path.
     func finalizeIfDangling() {
-        let text: String? = lock.withLock {
-            guard isTTY, lastLineLength > 0 else { return nil }
+        lock.withLock {
+            guard isTTY, lastLineLength > 0 else { return }
             lastLineLength = 0
-            return "\n"
+            emit("\n")
         }
-        guard let text else { return }
-        write(text)
+        flushOutput()
     }
 
     /// Clear the live line (if any was drawn) and print a fixed summary that
     /// survives — always emitted, TTY or not.
     private func finishPhase(_ summary: String) {
-        let text = lock.withLock { () -> String in
-            var text = ""
-            if isTTY, lastLineLength > 0 {
-                text += "\r" + String(repeating: " ", count: lastLineLength) + "\r"
-            }
-            lastLineLength = 0
-            text += summary + "\n"
-            return text
+        lock.withLock {
+            emit(eraseLiveLine() + summary + "\n")
         }
-        write(text)
+        flushOutput()
     }
 
     /// Print a line that must interleave safely with whatever live line is
@@ -108,18 +110,12 @@ final class ProgressReporter: @unchecked Sendable {
     /// so the warning never overlaps/corrupts it, then leaves the tracked
     /// line length at 0 so the next progress redraw starts clean. Always
     /// emitted, TTY or not (a non-TTY has no live line to clear, so this
-    /// degrades to a plain line).
+    /// degrades to a plain line). No queue drain — this can be called from a
+    /// frame callback thread, which must never wait on stderr I/O.
     func interject(_ line: String) {
-        let text = lock.withLock { () -> String in
-            var text = ""
-            if isTTY, lastLineLength > 0 {
-                text += "\r" + String(repeating: " ", count: lastLineLength) + "\r"
-            }
-            lastLineLength = 0
-            text += line + "\n"
-            return text
+        lock.withLock {
+            emit(eraseLiveLine() + line + "\n")
         }
-        write(text)
     }
 
     // MARK: - Resolve phase
@@ -136,14 +132,12 @@ final class ProgressReporter: @unchecked Sendable {
     /// `FrameCollector.reported`, which increments either way). Bumps the
     /// cumulative counter unconditionally, then attempts a throttled redraw.
     func extractFrameCompleted(total: Int, clipIndex: Int, clipCount: Int) {
-        let text = bumpAndRenderThrottled(
+        bumpAndRenderThrottled(
             { extractCompleted += 1 },
             makeLine: { tick in
                 ProgressLine.extract(tick: tick, completed: extractCompleted, total: total, clipIndex: clipIndex, clipCount: clipCount)
             }
         )
-        guard let text else { return }
-        write(text)
     }
 
     func extractFinished(total: Int, clipCount: Int) {
@@ -153,50 +147,73 @@ final class ProgressReporter: @unchecked Sendable {
     // MARK: - Encode phase
 
     func encodeFrameCompleted(total: Int) {
-        let text = bumpAndRenderThrottled(
+        bumpAndRenderThrottled(
             { encodeCompleted += 1 },
             makeLine: { tick in ProgressLine.encode(tick: tick, completed: encodeCompleted, total: total) }
         )
-        guard let text else { return }
-        write(text)
     }
 
     func encodeFinished(total: Int) {
         finishPhase(ProgressLine.encodeSummary(total: total))
     }
 
+    // MARK: - Output ordering
+
+    /// Block until every chunk enqueued so far has been written. Called at
+    /// phase boundaries (command task only, never a frame callback) and by
+    /// tests before asserting on the sink.
+    func flushOutput() {
+        outputQueue.sync {}
+    }
+
+    /// Hand `text` to the serial output queue. Must be called with `lock`
+    /// held — enqueue order under the state lock IS the display order the
+    /// queue preserves. The enqueue itself never blocks; only the queue's
+    /// worker thread ever runs `write`.
+    private func emit(_ text: String) {
+        outputQueue.async { [write] in write(text) }
+    }
+
     // MARK: - Rendering
 
     /// Apply `bumpCounter` and, on a TTY with the throttle window elapsed,
-    /// compute the next line to draw via `makeLine` — all within a SINGLE
+    /// enqueue the next line to draw via `makeLine` — all within a SINGLE
     /// lock acquisition. Splitting the counter bump and the throttle
     /// decision across two separate lock acquisitions (as an earlier version
     /// did) let two concurrent callers interleave: caller A bumps to 5,
     /// caller B bumps to 6 and wins the throttle window and draws "6/…",
     /// then caller A's own (now stale) throttle check can still pass and
     /// redraw "5/…" over it — the display visibly regresses. Doing both
-    /// under one lock makes "bump, then maybe draw" atomic per call, so the
-    /// line drawn always reflects the count as of that same call.
-    ///
-    /// Returns the text to write, if any; the caller writes it AFTER this
-    /// method returns (lock already released) — `write` can be slow/blocking
-    /// I/O and must never run while `lock` is held (see the class doc).
-    private func bumpAndRenderThrottled(_ bumpCounter: () -> Void, makeLine: (Int) -> String) -> String? {
+    /// under one lock makes "bump, then maybe draw" atomic per call, and
+    /// enqueueing under that same lock keeps the write order identical to
+    /// the state-transition order (see the class doc).
+    private func bumpAndRenderThrottled(_ bumpCounter: () -> Void, makeLine: (Int) -> String) {
         lock.withLock {
             bumpCounter()
-            guard isTTY else { return nil }
+            guard isTTY else { return }
             let current = now()
-            guard current.timeIntervalSince(lastRenderTime) >= minRedrawInterval else { return nil }
+            guard current.timeIntervalSince(lastRenderTime) >= minRedrawInterval else { return }
             lastRenderTime = current
             tick += 1
-            return prepareLine(makeLine(tick))
+            emit(prepareLine(makeLine(tick)))
         }
+    }
+
+    /// The `\r`-erase sequence for whatever live line is currently drawn
+    /// (empty on a non-TTY or when nothing is drawn), resetting the tracked
+    /// length so the next redraw starts clean. Must be called with `lock`
+    /// held.
+    private func eraseLiveLine() -> String {
+        let erase = isTTY && lastLineLength > 0
+            ? "\r" + String(repeating: " ", count: lastLineLength) + "\r"
+            : ""
+        lastLineLength = 0
+        return erase
     }
 
     /// Compute `line` padded to erase any leftover tail from a longer
     /// previous line, and update `lastLineLength` to match. Must be called
-    /// with `lock` held; returns the text for the caller to `write` AFTER
-    /// releasing the lock.
+    /// with `lock` held; the caller enqueues the result via `emit`.
     private func prepareLine(_ line: String) -> String {
         let trailingClear = String(repeating: " ", count: max(0, lastLineLength - line.count))
         lastLineLength = line.count

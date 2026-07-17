@@ -47,6 +47,30 @@ private final class FakeSink: @unchecked Sendable {
     }
 }
 
+/// Stalls the output queue's very first write until released, capturing every
+/// chunk — the probe for "a stalled write must not be overtaken by a later
+/// transition's write".
+private final class BlockingSink: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stalledOnce = false
+    private var chunks: [String] = []
+    let firstWriteGate = DispatchSemaphore(value: 0)
+
+    func write(_ text: String) {
+        let shouldStall: Bool = lock.withLock {
+            guard !stalledOnce else { return false }
+            stalledOnce = true
+            return true
+        }
+        if shouldStall { firstWriteGate.wait() }
+        lock.withLock { chunks.append(text) }
+    }
+
+    var captured: [String] {
+        lock.withLock { chunks }
+    }
+}
+
 @Suite struct ProgressReporterTests {
     private func makeReporter(isTTY: Bool, clock: FakeClock, sink: FakeSink) -> ProgressReporter {
         ProgressReporter(isTTY: isTTY, minRedrawInterval: 0.08, now: clock.now, write: sink.write)
@@ -60,6 +84,7 @@ private final class FakeSink: @unchecked Sendable {
         let reporter = makeReporter(isTTY: true, clock: clock, sink: sink)
 
         reporter.extractFrameCompleted(total: 10, clipIndex: 1, clipCount: 1)
+        reporter.flushOutput()
 
         #expect(sink.writeCount == 1)
         #expect(sink.joined.contains("1/10"))
@@ -72,6 +97,7 @@ private final class FakeSink: @unchecked Sendable {
 
         // Ten calls with no clock movement — only the first should draw.
         for _ in 0..<10 { reporter.extractFrameCompleted(total: 100, clipIndex: 1, clipCount: 1) }
+        reporter.flushOutput()
 
         #expect(sink.writeCount == 1)
     }
@@ -84,6 +110,7 @@ private final class FakeSink: @unchecked Sendable {
         reporter.extractFrameCompleted(total: 100, clipIndex: 1, clipCount: 1)
         clock.advance(by: 0.09)
         reporter.extractFrameCompleted(total: 100, clipIndex: 1, clipCount: 1)
+        reporter.flushOutput()
 
         #expect(sink.writeCount == 2)
     }
@@ -96,6 +123,7 @@ private final class FakeSink: @unchecked Sendable {
         for _ in 0..<5 { reporter.extractFrameCompleted(total: 100, clipIndex: 1, clipCount: 1) }
         clock.advance(by: 0.09)
         reporter.extractFrameCompleted(total: 100, clipIndex: 1, clipCount: 1)
+        reporter.flushOutput()
 
         // The counter incremented on every call (6), even though only two
         // redraws happened — the visible line reflects the true count.
@@ -110,6 +138,7 @@ private final class FakeSink: @unchecked Sendable {
         reporter.extractFrameCompleted(total: 10, clipIndex: 1, clipCount: 1)
         clock.advance(by: 0.09)
         reporter.encodeFrameCompleted(total: 10)
+        reporter.flushOutput()
 
         #expect(sink.joined.contains("1/10 (clip"))
         #expect(sink.joined.contains("1/10 frames"))
@@ -125,6 +154,7 @@ private final class FakeSink: @unchecked Sendable {
         reporter.extractFrameCompleted(total: 1000, clipIndex: 3, clipCount: 5) // long line
         clock.advance(by: 0.09)
         reporter.encodeFrameCompleted(total: 1) // short line, different phase
+        reporter.flushOutput()
 
         // The second write must pad with enough spaces to fully erase the
         // first (longer) line's tail.
@@ -168,6 +198,7 @@ private final class FakeSink: @unchecked Sendable {
         let reporter = makeReporter(isTTY: false, clock: clock, sink: sink)
 
         for _ in 0..<20 { reporter.extractFrameCompleted(total: 20, clipIndex: 1, clipCount: 1) }
+        reporter.flushOutput()
 
         #expect(sink.writeCount == 0)
     }
@@ -245,6 +276,7 @@ private final class FakeSink: @unchecked Sendable {
 
         reporter.extractFrameCompleted(total: 10, clipIndex: 1, clipCount: 1) // draws a live line
         reporter.interject("lyra-dynamic-wallpaper: warning: could not resolve foo.mp4 — skipping")
+        reporter.flushOutput()
 
         // The live line must be erased (its own \r + spaces + \r) before the
         // warning is printed, exactly like finishPhase — never appended onto
@@ -262,6 +294,7 @@ private final class FakeSink: @unchecked Sendable {
         reporter.interject("warning")
         clock.advance(by: 0.09)
         reporter.encodeFrameCompleted(total: 1) // short line, unrelated phase
+        reporter.flushOutput()
 
         // If interject left the old (long) lastLineLength in place, this
         // short redraw would still be padded to erase the long line's tail;
@@ -276,8 +309,33 @@ private final class FakeSink: @unchecked Sendable {
         let reporter = makeReporter(isTTY: false, clock: clock, sink: sink)
 
         reporter.interject("lyra-dynamic-wallpaper: warning: empty trim range — skipping")
+        reporter.flushOutput()
 
         #expect(sink.joined == "lyra-dynamic-wallpaper: warning: empty trim range — skipping\n")
+    }
+
+    // MARK: - Write ordering (serial output queue)
+
+    @Test func stalledWriteIsNeverOvertakenByALaterTransition() {
+        let clock = FakeClock()
+        let sink = BlockingSink()
+        // Zero throttle so both calls render — the subject here is ordering,
+        // not coalescing.
+        let reporter = ProgressReporter(isTTY: true, minRedrawInterval: 0, now: clock.now, write: sink.write)
+
+        reporter.extractFrameCompleted(total: 2, clipIndex: 1, clipCount: 1) // its write stalls on the gate
+        reporter.extractFrameCompleted(total: 2, clipIndex: 1, clipCount: 1) // enqueued behind it; this call must not block
+
+        // Both calls returned while the first write is still stalled — release
+        // it and drain. The stalled "1/2" must land BEFORE "2/2": a stale line
+        // overtaking a newer one is exactly the regression this guards.
+        sink.firstWriteGate.signal()
+        reporter.flushOutput()
+
+        let captured = sink.captured
+        #expect(captured.count == 2)
+        #expect(captured[0].contains("1/2"))
+        #expect(captured[1].contains("2/2"))
     }
 
     // MARK: - TTY: phaseStarted is visible immediately (no silent phases)
