@@ -3,8 +3,8 @@
 <!-- TODO: hero banner (assets/hero.jpg) — regenerate via make-image when an image backend is available -->
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Swift-6.0-F05138?logo=swift&logoColor=white" alt="Swift 6.0">
-  <img src="https://img.shields.io/badge/macOS-14%2B-000000?logo=apple&logoColor=white" alt="macOS 14+">
+  <img src="https://img.shields.io/badge/Swift-6.0-F05138?logo=swift&amp;logoColor=white" alt="Swift 6.0">
+  <img src="https://img.shields.io/badge/macOS-14%2B-000000?logo=apple&amp;logoColor=white" alt="macOS 14+">
   <img src="https://github.com/GeneralD/lyra-dynamic-wallpaper/actions/workflows/ci.yml/badge.svg" alt="CI">
   <img src="https://img.shields.io/badge/license-GPL--3.0-blue" alt="License GPL-3.0">
   <a href="https://github.com/GeneralD/lyra"><img src="https://img.shields.io/badge/built%20on-LyraKit-8A63D2" alt="Built on LyraKit"></a>
